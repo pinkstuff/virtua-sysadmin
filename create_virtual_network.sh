@@ -29,7 +29,7 @@ function create_debootstrap {
           --no-check-gpg               \
           --arch=amd64                 \
           --include \
-                   openssh-server,locales  \
+                   openssh-server,locales,python,python-apt \
            jessie                          \
            /mnt/debian_debootstrap         \
            http://ftp.uk.debian.org/debian \
@@ -248,18 +248,39 @@ function birth_vm {
         local disk_image=/dev/vg-virtual/debian${machine_number}
     fi
 
-    local cmd="/usr/bin/virt-install --name=debian${machine_number}
-               --ram=1024
-               --vcpus=1
-               --import
-               --disk path=$disk_image,bus=virtio
-               $net
-               --os-type=linux
-               --os-variant=debianwheezy
-               --boot kernel=\"/vmlinuz\",initrd=\"/initrd.img\",kernel_args=\"root=/dev/vda1\" "
-    eval $cmd
+    # do we have a place to store Debian Jessie kernels? 
+    
+    if [ -d /var/lib/libvirt/boot ]; then
+        # yes! is there anything in them?
+        ls /var/lib/libvirt/boot/vmlinuz* > /dev/null 2>&1
+        local ret_kernel=$?
+        ls /var/lib/libvirt/boot/initrd* > /dev/null 2>&1
+        local ret_initrd=$?
+        if [ $ret_kernel -eq 0 ] && [ $ret_initrd -eq 0 ]; then
+            # lets get the newest one
+            local kernel=$(ls /var/lib/libvirt/boot/vmlinuz* |sort -g |head -n1)
+            local initrd=$(ls /var/lib/libvirt/boot/initrd* |sort -g |head -n1)
+        else
+            local kernel=/vmlinuz
+            local initrd=/initrd
+        fi
+    else
+        local kernel=/vmlinuz
+        local initrd=/initrd
+    fi
+    # in either case we shall use the hypervisors kernel. This is only going to 
+    # cause pain later
 
-
+    /usr/bin/virt-install \
+               --name=debian${machine_number} \
+               --ram=1024 \
+               --vcpus=1 \
+               --import \
+               --disk path=$disk_image,bus=virtio \
+               $net \
+               --os-type=linux \
+               --os-variant=debianwheezy \
+               --boot kernel=${kernel},initrd=${initrd},kernel_args=\"root=/dev/vda1\" 
 }
 
 function create_isolated_network {
@@ -472,10 +493,4 @@ case $1 in
 esac
 
 exit $?
-
-
-
-
-
-
 

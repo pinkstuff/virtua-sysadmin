@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # TODO:
+# STOP RUNNING THIS SCRIPT AS ROOT
 # Append to existing volume group if present
 # Create new volume group only as a last resort
 # support creation of ISO's
@@ -13,7 +14,7 @@
 #set -x
 
 ### Globals ###
-SIMULATE=true
+SIMULATE=false
 CHROOT_DIR=/mnt/debian-chroot
 
 
@@ -122,7 +123,7 @@ function create_debootstrap {
                  --no-check-gpg \
                  --arch=amd64 \
                  --include \
-                    openssh-server,locales,python,python-apt \
+                    openssh-server,locales,python,python-apt,console-setup,grub2 \
                  jessie \
                  $CHROOT_DIR \
                  http://ftp.uk.debian.org/debian
@@ -133,7 +134,7 @@ function create_debootstrap {
 function create_fstab {
     # creates the fstab file for the system disk
 
-    local redirect=$CHROOT/etc/fstab
+    local redirect=$CHROOT_DIR/etc/fstab
     $SIMULATE && redirect=/dev/stdout
 
     cat << EOF > $redirect
@@ -159,9 +160,11 @@ EOF
 }
 
 
-function copy_locale_stuff {
+function set_locale {
     # attempts to configure locale information and keyboard
     # layout
+
+    run_cmd chroot $CHROOT_DIR ln -s /usr/ 
 
     run_cmd cp /etc/default/locale $CHROOT_DIR/etc/default/locale
     run_cmd cp /etc/default/keyboard $CHROOT_DIR/etc/default/keyboard
@@ -447,8 +450,8 @@ function copy_and_patch_image {
 
 }
 
-#create_base_image /var/lib/libvirt/images/debian_blank.img
-copy_and_patch_image /var/lib/libvirt/images/debian_blank.img /var/lib/libvirt/images/test.img true
+create_base_image /var/lib/libvirt/images/debian-core.img
+#copy_and_patch_image /var/lib/libvirt/images/debian_blank.img /var/lib/libvirt/images/test.img true
 
 # #### main entry point ####
 # 

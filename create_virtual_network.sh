@@ -31,6 +31,36 @@ function run_cmd {
     fi
 }
 
+
+function run_chroot_cmd {
+    
+    if ! $SIMULATE && ! df| grep -q $CHROOT_DIR; then
+        echo "$CHROOT_DIR is not mounted" >&2
+        return 1
+    fi
+
+    run_cmd mount --bind /dev $CHROOT_DIR/dev
+    run_cmd mount --bind /proc $CHROOT_DIR/proc
+    run_cmd mount --bind /sys $CHROOT_DIR/sys
+
+    if ! $SIMULATE; then
+        chroot $CHROOT_DIR \
+                /usr/bin/env -i PATH=/bin:/sbin/:/usr/bin:/usr/sbin \
+                $@
+    else
+        echo $@
+
+    fi
+
+    run_cmd umount --force $CHROOT_DIR/dev
+    run_cmd umount --force $CHROOT_DIR/proc
+    run_cmd umount --force $CHROOT_DIR/sys
+
+    return 0
+}
+
+
+
 function make_partition {
     # partition image from now on we wont
     # reference the partition manually
@@ -66,6 +96,7 @@ function format_partition {
     
     local device=$1 
     local dev_file=$(run_cmd kpartx -v -a $device |cut -d ' ' -f3)
+    sleep 1
     $SIMULATE && dev_file="loop0p1"
     if echo $dev_file |grep -q "llseek error"; then
         echo "cant find drive"
@@ -108,13 +139,11 @@ function mount_chroot {
 }
 
 
-
-
 function create_debootstrap {
     # creates a latest debian debootstrap 
     # on a given device
     
-    if ! $SIMULATE && ! df $CHROOT_DIR > /dev/null 2>&1; then 
+    if ! $SIMULATE && df $CHROOT_DIR > /dev/null 2>&1; then 
         echo "chroot image doesnt appear to be mounted" >&2
         return 1
     fi
@@ -145,6 +174,17 @@ EOF
 }
 
 
+function install_kernel_and_headers {
+   
+    local headers="linux-headers-3.16.0-4-amd64"
+    local kernel="linux-image-3.16.0-4-amd64"
+
+    }
+
+
+
+
+
 function configure_apt {
     # Adds the security sources to aptitude
 
@@ -155,6 +195,8 @@ function configure_apt {
 deb-src http://ftp.uk.debian.org/debian jessie main
 deb http://security.debian.org/ jessie/updates main
 deb-src http://security.debian.org/ jessie/updates main
+# Saltstack
+deb http://debian.saltstack.com/debian jessie-saltstack main
 EOF
     return $?
 }
@@ -164,13 +206,15 @@ function set_locale {
     # attempts to configure locale information and keyboard
     # layout
 
-    run_cmd chroot $CHROOT_DIR ln -s /usr/ 
+    local redirect=$CHROOT_DIR/etc/locale.conf
+    $SIMULATE && redirect=/dev/stdout
+    run_chroot_cmd /bin/rm /etc/localtime
+    run_chroot_cmd /bin/ln -s /usr/share/zoneinfo/Europe/London /etc/localtime
+    ! $SIMULATE && sed -i "s/# en_GB.UTF-8 UTF-8/en_GB.UTF-8 UTF-8/" $CHROOT_DIR/etc/locale.gen
+    run_chroot_cmd /bin/echo "LANG=en_GB.UTF-8" > $redirect
+    ! $SIMULATE && chroot $CHROOT_DIR /usr/bin/env -i PATH=/bin:/sbin/:/usr/bin:/usr/sbin /usr/sbin/locale-gen
 
-    run_cmd cp /etc/default/locale $CHROOT_DIR/etc/default/locale
-    run_cmd cp /etc/default/keyboard $CHROOT_DIR/etc/default/keyboard
-    run_cmd cp /etc/default/rcS $CHROOT_DIR/etc/default/rcS
-    run_cmd cp /etc/timezone $CHROOT_DIR/etc/timezone
-    return $?
+    return 0
 }
 
 
@@ -200,7 +244,7 @@ function umount_chroot {
     # cleans up afterwards
 
     local device=$1
-    run_cmd umount $CHROOT_DIR || return 1
+    run_cmd umount -l $CHROOT_DIR || return 1
     run_cmd /sbin/kpartx -v -d $device || return 1
     return 0
 }
@@ -210,7 +254,7 @@ function create_base_image {
     # performs post install operations
     # sets passwords, configure locales and apt
     # creates fstab
-    
+ 
     local image_device=$1
 
     if [ ! -e $image_device ]; then
@@ -224,7 +268,7 @@ function create_base_image {
     create_debootstrap || return 1
     create_fstab || return 1
     configure_apt || return 1
-    copy_locale_stuff || return 1
+    set_locale || return 1
     set_root_password "admin" || return 1
     set_hostname "Debian-Blank" || return 1
     insert_ssh_key pinky || return 1
@@ -241,7 +285,7 @@ function cidr_to_netmask {
 function set_root_password {
     local password=$1
     $SIMULATE && return 0
-    echo $1 |run_cmd chroot $CHROOT_DIR passwd root --stdin
+    echo "root:$password" | chroot $CHROOT_DIR /usr/sbin/chpasswd
     return $?
 }
 
@@ -261,14 +305,14 @@ function generate_mac {
 function enable_ipv4_forward {
     # enables ipv4 forward so a machine can act as a router 
 
-    if ! $SIMULATE && [ -d $CHROOT_DIR/bin ]; then
+    if ! $SIMULATE && [ ! -d $CHROOT_DIR/bin ]; then
         echo "Image not mounted" >&2
         return 1
     fi
 
     local redirect=$CHROOT_DIR/etc/sysctl.conf
     $SIMULATE && redirect=/dev/stdout
-    echo "net.ipv4.ip_forward=1" >> $redirect 
+    echo "net.ipv4.ip_forward=1" >> $redirect
 }
 
 
@@ -277,10 +321,13 @@ function set_static_network {
     # needs ip and mac address, default nic is eth0
     # optional gateway and dns
    
-    if ! $SIMULATE && [ -d $CHROOT_DIR/bin ]; then
+    if ! $SIMULATE && [ ! -d $CHROOT_DIR/bin ]; then
         echo "Image not mounted" >&2
         return 1
     fi
+
+    local gateway=""
+    local dns=""
 
     local interfaces=$CHROOT_DIR/etc/network/interfaces
     $SIMULATE && interfaces=/dev/stdout
@@ -314,7 +361,10 @@ function set_static_network {
     echo "    hwaddress $mac" >> $interfaces 
     echo "    address $ip" >> $interfaces
 
-    if [ ! -z $gateway ]; then
+    # WHY THE FUCK DOES THIS WORK??
+    # [ -n $gateway ] is true ??
+
+    if  [ ! -z $gateway ]; then
         echo "    gateway $gateway" >> $interfaces
     fi
     if [ ! -z $dns ]; then
@@ -322,6 +372,7 @@ function set_static_network {
     fi
 
     echo >> $interfaces
+    return 0
 }
 
 
@@ -396,8 +447,32 @@ function copy_and_patch_image {
     local destination=$2
     local hname=${destination##*/}
     hname=${hname%%.*}
-    local nat=false
-    $3 && nat=$3
+
+    local nat=false  
+
+    for arguement in ${@:2}; do
+        case $arguement in
+            ip1=*)
+            local ip1="${arguement#*=}"
+            ;;
+            ip2=*)
+            local ip2="${arguement#*=}"
+            ;;
+            gateway=*)
+            local gateway="${arguement#*=}"
+            ;;
+            dns=*)
+            local dns="${arguement#*=}"
+            ;;
+            master | -m)
+            local master=true
+            ;;
+            nat | -n)
+            local nat=true
+            ;;
+        esac
+    done
+
 
     if [ -z $image_file ] || [ ! -e $image_file ]; then
         echo "Cant find base image" >&2
@@ -417,41 +492,131 @@ function copy_and_patch_image {
         # we have an image file
         run_cmd cp $image_file $destination
     fi
-   
+ 
     mount_chroot $destination
-    
-    if [ $? -ne 0 ] || [ -d $CHROOT_DIR/bin ]; then    
+ 
+    if [ $? -ne 0 ] || [ ! -d $CHROOT_DIR/bin ]; then 
         echo "image file cannot be mounted, has it been created?" >&2
         return 1
     fi
-    
-   
+ 
     if $nat; then
         local mac1=$(generate_mac)
         local mac2=$(generate_mac)
-        set_static_network ip=172.18.3.1/28 \
-                           mac=$mac1 || return 1
-        set_static_network ip=172.18.2.10/24 \
+        set_static_network ip=$ip1 \
+                           mac=$mac1 \
+                           "gateway=$gateway" \
+                           "dns=$dns" \
+                           nic="eth0" || return 1
+        set_static_network ip=$ip2 \
                            mac=$mac2 \
-                           gateway="172.18.2.1" \
-                           dns="172.18.2.1" \
                            nic="eth1" || return 1
         enable_ipv4_forward || return 1
     else
         mac=$(generate_mac)
-        set_static_network ip=172.18.3.${number}/28 \
-                           gateway="172.18.3.1" \
-                           dns="172.18.2.1" || return 1
+        set_static_network ip=$ip1 \
+                           gateway=$gateway \
+                           dns=$dns || return 1
     fi
 
     set_hostname $hname || return 1
+    
+    if $master; then
+        install_package salt-master
+    else
+        install_package salt-minion
+    fi
+   
+    sleep 3
     umount_chroot $destination || return 1
     return 0
 
 }
 
-create_base_image /var/lib/libvirt/images/debian-core.img
-#copy_and_patch_image /var/lib/libvirt/images/debian_blank.img /var/lib/libvirt/images/test.img true
+
+function install_package {
+
+    local package=$1
+    
+    run_chroot_cmd apt-get update
+    run_chroot_cmd apt-get -y --force-yes install $package 
+    return 0
+
+}
+
+
+#create_base_image /var/lib/libvirt/images/debian-core.img
+
+
+function create_test_network {
+    
+    local image_dir=/var/lib/libvirt/images/
+    local base_image=$image_dir/debian-core.img
+
+    # NAT gateway and firewall machine
+    copy_and_patch_image \
+             $base_image \
+             $image_dir/nat-gw.img \
+             nat \
+             "ip1=172.18.10.2/24" \
+             "gateway=172.18.10.1/24" \
+             "dns=8.8.8.8" \
+             "ip2=172.18.5.10/27"
+   
+    # monitoring server 
+#    copy_and_patch_image \
+#             $base_image \
+#             $image_dir/monitor.img \
+#             "ip1=172.18.5.11/27" \
+#             "gateway=172.18.5.10/27" \
+#             "dns=8.8.8.8" \
+#
+#    # salt-master and ldap
+#    copy_and_patch_image \
+#             $base_image \
+#             $image_dir/commander \
+#             master \
+#             "ip1=172.18.5.12/27" \
+#             "gateway=172.18.5.10/27" \
+#             "dns=8.8.8.8"
+#
+#    # openvpn server
+#    copy_and_patch_image \
+#             $base_image \
+#             $image_dir/vpn \
+#             master \
+#             "ip1=172.18.5.13/27" \
+#             "gateway=172.18.5.10/27" \
+#             "dns=8.8.8.8" 
+#
+#    # DHCP and DNS
+#    copy_and_patch_image \
+#             $base_image \
+#             $image_dir/network-manager \
+#             master \
+#             "ip1=172.18.5.14/27" \
+#             "gateway=172.18.5.10/27" \
+#             "dns=8.8.8.8" 
+#
+#    # SAMBA and NFS share  
+#    copy_and_patch_image \
+#             $base_image \
+#             $image_dir/fileserver \
+#             "ip1=172.18.5.15/27" \
+#             "gateway=172.18.5.10/27" \
+#             "dns=8.8.8.8" 
+#
+#    # Download daemons and media sorters 
+#    copy_and_patch_image \
+#             $base_image \
+#             $image_dir/downloads \
+#             "ip1=172.18.5.16/27" \
+#             "gateway=172.18.5.10/27" \
+#             "dns=8.8.8.8" 
+}
+
+
+
 
 # #### main entry point ####
 # 
@@ -525,4 +690,4 @@ create_base_image /var/lib/libvirt/images/debian-core.img
 # esac
 # 
 # exit $?
-
+create_test_network 
